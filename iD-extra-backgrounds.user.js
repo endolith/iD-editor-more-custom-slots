@@ -1,17 +1,23 @@
 // ==UserScript==
 // @name         iD Editor: Multiple Custom Backgrounds
 // @namespace    https://github.com/endolith
-// @version      0.1.0
+// @version      0.1.1
 // @description  Adds multiple editable custom tile URL slots to the iD editor background list.
 // @homepageURL  https://github.com/openstreetmap/iD/issues/10055
 // @match        *://www.openstreetmap.org/edit*
 // @match        *://www.openstreetmap.org/id*
 // @run-at       document-start
 // @grant        none
+// @inject-into  page
 // ==/UserScript==
 
 // HOW IT WORKS
 // ─────────────────────────────────────────────────────────────────────────────
+// @inject-into page — REQUIRED (Violentmonkey / Tampermonkey). User scripts default
+// to an isolated "content" world where window.iD does not exist and where
+// stopImmediatePropagation does not block OSM's page-world DOMContentLoaded handler.
+// Page injection runs in the same JS realm as iD and id.js.
+//
 // OSM registers its iD initialization on DOMContentLoaded. Because this script
 // runs at document-start, our DOMContentLoaded listener is registered *first*
 // and therefore fires before OSM's. We:
@@ -263,17 +269,24 @@
     // We are registered first (document-start), so this listener fires before
     // OSM's DOMContentLoaded handler. We intercept the natural event, set up the
     // hook, then re-dispatch so OSM's handler runs cleanly against our hooked iD.
-    let _intercepted = false;
+    let _hooked = false;
     document.addEventListener('DOMContentLoaded', function onReady(e) {
-        if (_intercepted) return;
-        _intercepted = true;
+        if (_hooked) return;
+
+        if (typeof window.iD === 'undefined' || typeof window.iD.coreContext !== 'function') {
+            console.error(
+                '[iD-extra-backgrounds] window.iD.coreContext missing — enable page injection ' +
+                '(Violentmonkey / Tampermonkey: @inject-into page).'
+            );
+            return;
+        }
+
+        _hooked = true;
 
         // Prevent OSM's handler from seeing the natural DOMContentLoaded.
         e.stopImmediatePropagation();
 
-        if (window.iD && typeof window.iD.coreContext === 'function') {
-            wrapCoreContext(window.iD);
-        }
+        wrapCoreContext(window.iD);
 
         // Fire a clean event so OSM's handler (and any other deferred init code)
         // runs as normal, now with our hook in place.
