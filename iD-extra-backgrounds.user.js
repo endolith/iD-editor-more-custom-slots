@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         iD Editor: Multiple Custom Backgrounds
 // @namespace    https://github.com/endolith
-// @version      0.6.0
+// @version      0.6.1
 // @description  Adds multiple editable custom tile URL slots to the iD editor background list.
 // @homepageURL  https://github.com/openstreetmap/iD/issues/10055
 // @match        *://www.openstreetmap.org/id*
@@ -18,24 +18,23 @@
 // TWO PATHS, both always attempted:
 //
 // Early (property interceptor):
-//   Use Object.defineProperty to intercept window.iD being assigned. This fires
-//   synchronously the moment the iD bundle sets window.iD = {...}, before any
-//   OSM code can call coreContext(). We wrap coreContext so the context OSM
-//   creates has our hook baked in. After context.init() we push extra
-//   rendererBackgroundSource entries and call ui().restart().
+//   Use Object.defineProperty to intercept window.iD and window.iD.coreContext
+//   being assigned. iD bundles vary: some do window.iD = {coreContext,...} in
+//   one assignment; others do window.iD = {} early and add coreContext later.
+//   We handle both by watching the window.iD assignment AND the coreContext
+//   property on the iD object. The moment coreContext becomes a function, we
+//   wrap it before OSM can call it.
 //
 //   NOTE: DOMContentLoaded capture was tried previously but proved unreliable
 //   for Violentmonkey iframe injection — the listener would never fire even
-//   when readyState was 'loading' at script start. Property interception has
-//   no such dependency on event timing.
+//   when readyState was 'loading' at script start.
 //
-// Late (shared imagery fallback — always runs in parallel):
-//   We create a throwaway coreContext() just to call background.ensureLoaded()
-//   (which returns the module-level _imageryIndex singleton), then splice extra
-//   entries into imagery.backgrounds. We poll for the background pane button to
-//   appear, then toggle it to force the list to re-render.
-//   injectSlotsIntoImagery() is idempotent (filters before inserting), so if
-//   the early path already ran, this is a safe no-op.
+// Late (shared imagery fallback):
+//   Triggered ONLY after iD's background UI button appears (guaranteeing iD is
+//   fully initialized) AND the early path didn't hook. Calls a throwaway
+//   coreContext() to access the shared _imageryIndex singleton, splices extra
+//   entries into imagery.backgrounds, then toggles the background pane to
+//   force a re-render. injectSlotsIntoImagery() is idempotent.
 // ─────────────────────────────────────────────────────────────────────────────
 
 (function () {
@@ -189,7 +188,7 @@
         });
 
         window.__iDExtraBg = {
-            version: '0.6.0',
+            version: '0.6.1',
             hooked: true,
             mode: 'init-hook',
             backgroundsLen: imagery.backgrounds.length,
@@ -231,7 +230,7 @@
         injectSlotsIntoImagery(imagery);
 
         window.__iDExtraBg = {
-            version: '0.6.0',
+            version: '0.6.1',
             hooked: true,
             mode: 'late-fallback',
             backgroundsLen: imagery.backgrounds.length,
@@ -389,49 +388,72 @@
 
     // ── Bootstrap ─────────────────────────────────────────────────────────────
 
-    window.__iDExtraBg = { version: '0.6.0', hooked: false, strategy: 'init' };
+    window.__iDExtraBg = { version: '0.6.1', hooked: false, strategy: 'init' };
 
-    // Intercept window.iD being assigned. This fires synchronously the instant
-    // the iD bundle executes window.iD = {...}, before any OSM code can call
-    // coreContext(). Works regardless of DOMContentLoaded or readyState timing.
-    (function installInterceptor() {
-        if (window.iD && typeof window.iD.coreContext === 'function') {
-            // iD already loaded before our script ran.
-            wrapCoreContext(window.iD);
-            window.__iDExtraBg.strategy = 'iD-already-present';
+    // Given an iD object, wrap coreContext immediately if present, or intercept
+    // the property so we catch it the instant it's added to the object.
+    function _setupCoreContextHook(iDObj) {
+        if (typeof iDObj.coreContext === 'function') {
+            wrapCoreContext(iDObj);
+            window.__iDExtraBg.strategy = 'coreContext-present';
             return;
         }
+        // coreContext not on the object yet — watch for it being assigned.
+        window.__iDExtraBg.strategy = 'watching-coreContext';
+        let _ccVal = iDObj.coreContext;
+        Object.defineProperty(iDObj, 'coreContext', {
+            configurable: true, enumerable: true,
+            get() { return _ccVal; },
+            set(fn) {
+                _ccVal = fn;
+                // Restore as a plain writable property so iD works normally.
+                try {
+                    Object.defineProperty(iDObj, 'coreContext', {
+                        configurable: true, enumerable: true, writable: true, value: fn,
+                    });
+                } catch (_) {}
+                if (typeof fn === 'function') {
+                    wrapCoreContext(iDObj);
+                    window.__iDExtraBg.strategy = 'coreContext-intercepted';
+                }
+            },
+        });
+    }
+
+    if (window.iD) {
+        _setupCoreContextHook(window.iD);
+    } else {
+        // window.iD not set yet — intercept the assignment, then hook coreContext.
         window.__iDExtraBg.strategy = 'waiting-for-iD';
-        let _iDVal = window.iD;
+        let _iDVal;
         Object.defineProperty(window, 'iD', {
-            configurable: true,
-            enumerable: true,
+            configurable: true, enumerable: true,
             get() { return _iDVal; },
             set(val) {
                 _iDVal = val;
                 // Restore as a plain writable property so iD internals work normally.
                 try {
                     Object.defineProperty(window, 'iD', {
-                        configurable: true, enumerable: true,
-                        writable: true, value: val,
+                        configurable: true, enumerable: true, writable: true, value: val,
                     });
                 } catch (_) {}
-                if (val && typeof val.coreContext === 'function') {
-                    wrapCoreContext(val);
-                    window.__iDExtraBg.strategy = 'iD-intercepted';
-                } else {
-                    window.__iDExtraBg.strategy = 'iD-intercepted-no-coreContext';
-                }
+                if (val) _setupCoreContextHook(val);
             },
         });
-    })();
+    }
 
-    // Always run the late path in parallel as a guaranteed fallback.
-    // injectSlotsIntoImagery() filters before inserting, so if the early path
-    // already ran, the late path is effectively a safe no-op.
-    applySlotsLate().catch((err) =>
-        console.error('[iD-extra-bg] applySlotsLate failed', err)
-    );
+    // Late-path fallback: only triggers after iD's background UI button is
+    // visible (guaranteeing iD is fully initialized) AND the early hook hasn't
+    // fired. This avoids calling coreContext() while iD is still mid-init.
+    const _lateCheck = setInterval(() => {
+        if (window.__iDExtraBg.hooked) { clearInterval(_lateCheck); return; }
+        if (!document.querySelector('.map-pane-control.background-control button')) return;
+        clearInterval(_lateCheck);
+        dbg('early hook missed — triggering late fallback');
+        window.__iDExtraBg.strategy += '+late-fallback';
+        applySlotsLate().catch(err => console.error('[iD-extra-bg] applySlotsLate failed', err));
+    }, 500);
+    setTimeout(() => clearInterval(_lateCheck), 120000);
 
     dbg('bootstrap done, strategy=', window.__iDExtraBg.strategy,
         'readyState=', document.readyState);
