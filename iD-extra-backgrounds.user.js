@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         iD Editor: Multiple Custom Backgrounds
 // @namespace    https://github.com/endolith
-// @version      0.3.0
+// @version      0.5.0
 // @description  Adds multiple editable custom tile URL slots to the iD editor background list.
 // @homepageURL  https://github.com/openstreetmap/iD/issues/10055
 // @match        *://www.openstreetmap.org/id*
@@ -12,22 +12,23 @@
 
 // HOW IT WORKS
 // ─────────────────────────────────────────────────────────────────────────────
-// The iD editor on openstreetmap.org is NOT in the main page at /edit — it
-// runs inside an <iframe> whose src is /id (a separate HTML page). That is
-// why previous versions that matched /edit* always saw window.iD === undefined.
+// iD runs in an iframe at /id (not /edit). Read debug state from the parent:
+//   document.getElementById('id-embed').contentWindow.__iDExtraBg
 //
-// This script matches /id* so it runs inside the iframe itself. With
-// @inject-into page the script runs directly in the iframe's JavaScript
-// context (same realm as window.iD). id.js is loaded synchronously from
-// <head>, so by the time DOMContentLoaded fires, window.iD is already set.
+// TWO PATHS depending on when Violentmonkey injects relative to DOMContentLoaded:
 //
-// At document-start we register a *capture* DOMContentLoaded listener. It
-// fires before OSM's bubble-phase listener (which calls iD.coreContext()).
-// We wrap coreContext first, so the context OSM creates already has our
-// hook in place. Then, after context.init() runs, we push extra
-// rendererBackgroundSource entries into iD's imagery array — exactly like
-// the Strava Heatmap extension — and call ui().restart() to rebuild the
-// Background panel.
+// Early (readyState === 'loading'):
+//   Register a *capture* DOMContentLoaded listener. It fires before OSM's
+//   bubble-phase handler (which calls iD.coreContext()). We wrap coreContext
+//   first so the context OSM creates has our hook baked in. After context.init()
+//   we push extra rendererBackgroundSource entries and call ui().restart().
+//
+// Late (readyState !== 'loading' — events have already fired):
+//   We missed the coreContext hook. iD's background module keeps a module-level
+//   _imageryIndex singleton. We create a throwaway coreContext() just to call
+//   background.ensureLoaded() (which returns the shared singleton), then splice
+//   extra entries into imagery.backgrounds. We poll for the background pane
+//   button to appear, then toggle it to force the list to re-render.
 // ─────────────────────────────────────────────────────────────────────────────
 
 (function () {
@@ -73,7 +74,59 @@
         localStorage.setItem(STORAGE_KEY, JSON.stringify(slots));
     }
 
-    // ── iD hook ───────────────────────────────────────────────────────────────
+    // ── Shared imagery mutation ────────────────────────────────────────────────
+    // iD's background.js keeps a module-level _imageryIndex singleton that all
+    // rendererBackground instances share via ensureImageryIndex(). Mutating
+    // imagery.backgrounds affects what every instance sees.
+
+    function injectSlotsIntoImagery(imagery) {
+        imagery.backgrounds = imagery.backgrounds.filter(
+            b => !sourceId(b).startsWith(ID_PREFIX)
+        );
+
+        const slots = loadSlots();
+        const customIdx = imagery.backgrounds.findIndex(b => sourceId(b) === 'custom');
+        const insertAt  = customIdx >= 0 ? customIdx : 0;
+
+        for (let i = slots.length - 1; i >= 0; i--) {
+            const slot   = slots[i];
+            const source = window.iD.rendererBackgroundSource({
+                id:          `${ID_PREFIX}${i}`,
+                name:        slot.name || `Custom ${i + 1}`,
+                description: slot.template || 'No URL configured — click ⋯ to set',
+                template:    slot.template || '',
+                overlay:     false,
+            });
+            imagery.backgrounds.splice(insertAt, 0, source);
+        }
+        return slots;
+    }
+
+    // Close + reopen the Background pane so iD re-renders the list from imagery.
+    function toggleBackgroundPaneRefresh() {
+        const btn = document.querySelector('.map-pane-control.background-control button');
+        if (!btn) return false;
+        const wasOpen = !!document.querySelector('.map-pane.background-pane.shown');
+        btn.click();
+        setTimeout(() => { if (wasOpen) btn.click(); }, 100);
+        return true;
+    }
+
+    // Poll until selector appears or timeout (ms), then resolve with element (or null).
+    function waitForElement(selector, timeout = 30000) {
+        return new Promise(resolve => {
+            const found = document.querySelector(selector);
+            if (found) { resolve(found); return; }
+            const timer = setTimeout(() => { obs.disconnect(); resolve(null); }, timeout);
+            const obs = new MutationObserver(() => {
+                const el = document.querySelector(selector);
+                if (el) { clearTimeout(timer); obs.disconnect(); resolve(el); }
+            });
+            obs.observe(document.documentElement, { childList: true, subtree: true });
+        });
+    }
+
+    // ── iD hook (early path) ──────────────────────────────────────────────────
 
     let _context = null;
 
@@ -101,37 +154,16 @@
         };
     }
 
-    // ── Inject custom background sources ──────────────────────────────────────
-
+    // Full apply via real context (early path): reinit background + restart UI.
     async function applySlots(context) {
         dbg('applySlots start');
         const background = context.background();
         const imagery    = await background.ensureLoaded();
 
-        // Clear overlays before re-init (Strava pattern).
         const activeOverlayIds = background.overlayLayerSources().map(sourceId);
         background.overlayLayerSources().forEach(s => background.toggleOverlayLayer(s));
 
-        // Remove previous extra slots.
-        imagery.backgrounds = imagery.backgrounds.filter(
-            b => !sourceId(b).startsWith(ID_PREFIX)
-        );
-
-        const slots = loadSlots();
-        const customIdx = imagery.backgrounds.findIndex(b => sourceId(b) === 'custom');
-        const insertAt  = customIdx >= 0 ? customIdx : 0;
-
-        for (let i = slots.length - 1; i >= 0; i--) {
-            const slot   = slots[i];
-            const source = window.iD.rendererBackgroundSource({
-                id:          `${ID_PREFIX}${i}`,
-                name:        slot.name || `Custom ${i + 1}`,
-                description: slot.template || 'No URL configured — click ⋯ to set',
-                template:    slot.template || '',
-                overlay:     false,
-            });
-            imagery.backgrounds.splice(insertAt, 0, source);
-        }
+        injectSlotsIntoImagery(imagery);
 
         await background.init();
 
@@ -139,30 +171,95 @@
         dbg('hasRestorableChanges=', restorable);
 
         if (!restorable) {
-            // Safe to restart — no pending edits from a previous session.
             await new Promise(r => setTimeout(r, 0));
             await context.ui().restart();
             dbg('ui.restart() done');
         }
-
-        window.__iDExtraBg = {
-            version: '0.3.0',
-            hooked: true,
-            backgroundsLen: imagery.backgrounds.length,
-            slotIds: slots.map((_, i) => `${ID_PREFIX}${i}`),
-        };
 
         activeOverlayIds.forEach(id => {
             const src = background.findSource(id);
             if (src) background.toggleOverlayLayer(src);
         });
 
+        window.__iDExtraBg = {
+            version: '0.5.0',
+            hooked: true,
+            mode: 'init-hook',
+            backgroundsLen: imagery.backgrounds.length,
+        };
+
         patchBackgroundListDOM(context);
         installObserver(context);
         dbg('applySlots done', window.__iDExtraBg);
     }
 
-    // ── Inject ⋯ edit buttons ─────────────────────────────────────────────────
+    // Late apply via shared imagery (late path): mutate + pane toggle.
+    async function applySlotsLate() {
+        dbg('applySlotsLate start, readyState=', document.readyState);
+
+        // Wait for window.iD if not yet available.
+        const start = Date.now();
+        while (!window.iD || typeof window.iD.coreContext !== 'function') {
+            if (Date.now() - start > 20000) {
+                window.__iDExtraBg.error = 'window.iD.coreContext never became available';
+                console.error('[iD-extra-bg]', window.__iDExtraBg.error);
+                return;
+            }
+            await new Promise(r => setTimeout(r, 50));
+        }
+
+        const imagery = await window.iD.coreContext().background().ensureLoaded();
+
+        if (imagery.backgrounds.some(b => sourceId(b).startsWith(ID_PREFIX))) {
+            dbg('slots already present in imagery (init-hook ran first)');
+            window.__iDExtraBg = Object.assign({}, window.__iDExtraBg, {
+                hooked: true, mode: 'already-injected',
+            });
+            await waitForElement('.map-pane-control.background-control button');
+            patchBackgroundListDOM(_context);
+            installObserver(_context);
+            return;
+        }
+
+        injectSlotsIntoImagery(imagery);
+
+        window.__iDExtraBg = {
+            version: '0.5.0',
+            hooked: true,
+            mode: 'late-fallback',
+            backgroundsLen: imagery.backgrounds.length,
+        };
+
+        // Wait for the background pane button then refresh the list.
+        const btn = await waitForElement('.map-pane-control.background-control button');
+        if (btn) {
+            toggleBackgroundPaneRefresh();
+            await new Promise(r => setTimeout(r, 200));
+        }
+
+        patchBackgroundListDOM(_context);
+        installObserver(_context);
+        dbg('applySlotsLate done', window.__iDExtraBg);
+    }
+
+    // Re-apply after a URL is saved in the edit dialog.
+    async function reapplyAfterSave() {
+        const imagery = await window.iD.coreContext().background().ensureLoaded();
+        injectSlotsIntoImagery(imagery);
+
+        if (_context) {
+            // Trigger the real background's change event so the list re-renders.
+            const bg = _context.background();
+            bg.baseLayerSource(bg.baseLayerSource());
+        } else {
+            toggleBackgroundPaneRefresh();
+            await new Promise(r => setTimeout(r, 200));
+        }
+
+        patchBackgroundListDOM(_context);
+    }
+
+    // ── DOM patching — edit buttons ───────────────────────────────────────────
 
     let _observer = null;
 
@@ -190,7 +287,7 @@
             btn.innerHTML = '<svg class="icon"><use xlink:href="#iD-icon-more"/></svg>';
             btn.addEventListener('click', e => {
                 e.preventDefault();
-                openEditDialog(context, i);
+                openEditDialog(i);
             });
             li.appendChild(btn);
         });
@@ -198,7 +295,7 @@
 
     // ── Edit dialog ───────────────────────────────────────────────────────────
 
-    function openEditDialog(context, slotIndex) {
+    function openEditDialog(slotIndex) {
         document.getElementById('extra-bg-edit-modal')?.remove();
 
         const slots = loadSlots();
@@ -266,7 +363,9 @@
             };
             saveSlots(slots);
             backdrop.remove();
-            if (_context) applySlots(_context);
+            reapplyAfterSave().catch((err) =>
+                console.error('[iD-extra-bg] reapplyAfterSave failed', err)
+            );
         });
 
         nameEl.select();
@@ -283,26 +382,32 @@
 
     // ── Bootstrap ─────────────────────────────────────────────────────────────
 
-    window.__iDExtraBg = {
-        version: '0.3.0',
-        hooked: false,
-        note: 'Check this in the iD iframe context (select the frame in DevTools), not the parent page.',
-    };
+    window.__iDExtraBg = { version: '0.5.0', hooked: false };
 
-    // Capture phase fires before OSM's bubble-phase DOMContentLoaded handler.
-    // By the time DOMContentLoaded fires, id.js has already run synchronously
-    // from <head> and window.iD is defined.
-    document.addEventListener('DOMContentLoaded', function () {
-        dbg('DOMContentLoaded — window.iD type:', typeof window.iD);
-        if (!window.iD || typeof window.iD.coreContext !== 'function') {
-            window.__iDExtraBg.error = 'window.iD not found at DOMContentLoaded';
-            console.error('[iD-extra-bg]', window.__iDExtraBg.error);
-            return;
-        }
-        wrapCoreContext(window.iD);
-        window.__iDExtraBg.hooked = true;
-    }, { capture: true, once: true });
+    if (document.readyState === 'loading') {
+        // DOMContentLoaded hasn't fired yet. Our capture listener fires before
+        // OSM's bubble listener, which is when iD.coreContext() is called.
+        window.__iDExtraBg.strategy = 'capture-DCL-pending';
+        document.addEventListener('DOMContentLoaded', function () {
+            dbg('capture DCL fired, window.iD type:', typeof window.iD);
+            if (window.iD && typeof window.iD.coreContext === 'function') {
+                wrapCoreContext(window.iD);
+                window.__iDExtraBg.strategy = 'capture-DCL-hooked';
+            } else {
+                window.__iDExtraBg.error = 'window.iD not ready at capture DCL';
+                console.error('[iD-extra-bg]', window.__iDExtraBg.error);
+            }
+        }, { capture: true, once: true });
+    } else {
+        // DOMContentLoaded (and probably load) already fired — OSM has already
+        // called coreContext(). Use the shared imagery fallback immediately.
+        window.__iDExtraBg.strategy = 'immediate-late-fallback';
+        applySlotsLate().catch((err) =>
+            console.error('[iD-extra-bg] applySlotsLate failed', err)
+        );
+    }
 
-    dbg('bootstrap: capture listener registered, waiting for DOMContentLoaded');
+    dbg('bootstrap done, strategy=', window.__iDExtraBg.strategy,
+        'readyState=', document.readyState);
 
 })();
