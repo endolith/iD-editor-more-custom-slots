@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         iD Editor: Multiple Custom Backgrounds
 // @namespace    https://github.com/endolith
-// @version      0.5.0
+// @version      0.6.0
 // @description  Adds multiple editable custom tile URL slots to the iD editor background list.
 // @homepageURL  https://github.com/openstreetmap/iD/issues/10055
 // @match        *://www.openstreetmap.org/id*
@@ -15,20 +15,27 @@
 // iD runs in an iframe at /id (not /edit). Read debug state from the parent:
 //   document.getElementById('id-embed').contentWindow.__iDExtraBg
 //
-// TWO PATHS depending on when Violentmonkey injects relative to DOMContentLoaded:
+// TWO PATHS, both always attempted:
 //
-// Early (readyState === 'loading'):
-//   Register a *capture* DOMContentLoaded listener. It fires before OSM's
-//   bubble-phase handler (which calls iD.coreContext()). We wrap coreContext
-//   first so the context OSM creates has our hook baked in. After context.init()
-//   we push extra rendererBackgroundSource entries and call ui().restart().
+// Early (property interceptor):
+//   Use Object.defineProperty to intercept window.iD being assigned. This fires
+//   synchronously the moment the iD bundle sets window.iD = {...}, before any
+//   OSM code can call coreContext(). We wrap coreContext so the context OSM
+//   creates has our hook baked in. After context.init() we push extra
+//   rendererBackgroundSource entries and call ui().restart().
 //
-// Late (readyState !== 'loading' — events have already fired):
-//   We missed the coreContext hook. iD's background module keeps a module-level
-//   _imageryIndex singleton. We create a throwaway coreContext() just to call
-//   background.ensureLoaded() (which returns the shared singleton), then splice
-//   extra entries into imagery.backgrounds. We poll for the background pane
-//   button to appear, then toggle it to force the list to re-render.
+//   NOTE: DOMContentLoaded capture was tried previously but proved unreliable
+//   for Violentmonkey iframe injection — the listener would never fire even
+//   when readyState was 'loading' at script start. Property interception has
+//   no such dependency on event timing.
+//
+// Late (shared imagery fallback — always runs in parallel):
+//   We create a throwaway coreContext() just to call background.ensureLoaded()
+//   (which returns the module-level _imageryIndex singleton), then splice extra
+//   entries into imagery.backgrounds. We poll for the background pane button to
+//   appear, then toggle it to force the list to re-render.
+//   injectSlotsIntoImagery() is idempotent (filters before inserting), so if
+//   the early path already ran, this is a safe no-op.
 // ─────────────────────────────────────────────────────────────────────────────
 
 (function () {
@@ -182,7 +189,7 @@
         });
 
         window.__iDExtraBg = {
-            version: '0.5.0',
+            version: '0.6.0',
             hooked: true,
             mode: 'init-hook',
             backgroundsLen: imagery.backgrounds.length,
@@ -224,7 +231,7 @@
         injectSlotsIntoImagery(imagery);
 
         window.__iDExtraBg = {
-            version: '0.5.0',
+            version: '0.6.0',
             hooked: true,
             mode: 'late-fallback',
             backgroundsLen: imagery.backgrounds.length,
@@ -382,30 +389,49 @@
 
     // ── Bootstrap ─────────────────────────────────────────────────────────────
 
-    window.__iDExtraBg = { version: '0.5.0', hooked: false };
+    window.__iDExtraBg = { version: '0.6.0', hooked: false, strategy: 'init' };
 
-    if (document.readyState === 'loading') {
-        // DOMContentLoaded hasn't fired yet. Our capture listener fires before
-        // OSM's bubble listener, which is when iD.coreContext() is called.
-        window.__iDExtraBg.strategy = 'capture-DCL-pending';
-        document.addEventListener('DOMContentLoaded', function () {
-            dbg('capture DCL fired, window.iD type:', typeof window.iD);
-            if (window.iD && typeof window.iD.coreContext === 'function') {
-                wrapCoreContext(window.iD);
-                window.__iDExtraBg.strategy = 'capture-DCL-hooked';
-            } else {
-                window.__iDExtraBg.error = 'window.iD not ready at capture DCL';
-                console.error('[iD-extra-bg]', window.__iDExtraBg.error);
-            }
-        }, { capture: true, once: true });
-    } else {
-        // DOMContentLoaded (and probably load) already fired — OSM has already
-        // called coreContext(). Use the shared imagery fallback immediately.
-        window.__iDExtraBg.strategy = 'immediate-late-fallback';
-        applySlotsLate().catch((err) =>
-            console.error('[iD-extra-bg] applySlotsLate failed', err)
-        );
-    }
+    // Intercept window.iD being assigned. This fires synchronously the instant
+    // the iD bundle executes window.iD = {...}, before any OSM code can call
+    // coreContext(). Works regardless of DOMContentLoaded or readyState timing.
+    (function installInterceptor() {
+        if (window.iD && typeof window.iD.coreContext === 'function') {
+            // iD already loaded before our script ran.
+            wrapCoreContext(window.iD);
+            window.__iDExtraBg.strategy = 'iD-already-present';
+            return;
+        }
+        window.__iDExtraBg.strategy = 'waiting-for-iD';
+        let _iDVal = window.iD;
+        Object.defineProperty(window, 'iD', {
+            configurable: true,
+            enumerable: true,
+            get() { return _iDVal; },
+            set(val) {
+                _iDVal = val;
+                // Restore as a plain writable property so iD internals work normally.
+                try {
+                    Object.defineProperty(window, 'iD', {
+                        configurable: true, enumerable: true,
+                        writable: true, value: val,
+                    });
+                } catch (_) {}
+                if (val && typeof val.coreContext === 'function') {
+                    wrapCoreContext(val);
+                    window.__iDExtraBg.strategy = 'iD-intercepted';
+                } else {
+                    window.__iDExtraBg.strategy = 'iD-intercepted-no-coreContext';
+                }
+            },
+        });
+    })();
+
+    // Always run the late path in parallel as a guaranteed fallback.
+    // injectSlotsIntoImagery() filters before inserting, so if the early path
+    // already ran, the late path is effectively a safe no-op.
+    applySlotsLate().catch((err) =>
+        console.error('[iD-extra-bg] applySlotsLate failed', err)
+    );
 
     dbg('bootstrap done, strategy=', window.__iDExtraBg.strategy,
         'readyState=', document.readyState);
