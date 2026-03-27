@@ -1,12 +1,11 @@
 // ==UserScript==
 // @name         iD Editor: Multiple Custom Backgrounds
 // @namespace    https://github.com/endolith
-// @version      0.7.0
+// @version      0.7.2
 // @description  Adds multiple editable custom tile URL slots to the iD editor background list.
 // @homepageURL  https://github.com/openstreetmap/iD/issues/10055
 // @match        *://www.openstreetmap.org/id*
 // @run-at       document-start
-// @inject-into  page
 // @grant        none
 // ==/UserScript==
 
@@ -16,6 +15,13 @@
 //   document.getElementById('id-embed').contentWindow.__iDExtraBg
 //
 // TWO PATHS, both always attempted:
+//
+// NOTE: @inject-into page is intentionally absent. With that directive,
+//   Tampermonkey injects via a <script> element which OSM's CSP blocks
+//   (no unsafe-inline). Without it, Tampermonkey uses chrome.scripting
+//   .executeScript({ world:"MAIN" }) which bypasses CSP and still runs in
+//   the page context. Violentmonkey users: use @inject-into page if your
+//   version handles CSP, otherwise use @inject-into content with unsafeWindow.
 //
 // Early (Proxy interceptor):
 //   Intercepts the window.iD assignment and wraps the namespace object in a
@@ -95,7 +101,9 @@
 
         const slots = loadSlots();
         const customIdx = imagery.backgrounds.findIndex(b => sourceId(b) === 'custom');
-        const insertAt  = customIdx >= 0 ? customIdx : 0;
+        // Insert AFTER the built-in 'custom' entry so our slots appear next to it.
+        // If 'custom' isn't found, append to the end.
+        const insertAt  = customIdx >= 0 ? customIdx + 1 : imagery.backgrounds.length;
 
         for (let i = slots.length - 1; i >= 0; i--) {
             const slot   = slots[i];
@@ -107,6 +115,9 @@
                 template:    slot.template || '',
                 overlay:     false,
             });
+            // Override area so iD's background list sorts these to the bottom,
+            // grouped with the built-in 'Custom' entry (which has area = -2).
+            source.area = function () { return -2; };
             imagery.backgrounds.splice(insertAt, 0, source);
         }
         return slots;
@@ -174,7 +185,7 @@
         background.baseLayerSource(background.baseLayerSource());
 
         window.__iDExtraBg = {
-            version: '0.7.0',
+            version: '0.7.2',
             hooked: true,
             mode: 'init-hook',
             backgroundsLen: imagery.backgrounds.length,
@@ -219,7 +230,7 @@
         injectSlotsIntoImagery(imagery);
 
         window.__iDExtraBg = {
-            version: '0.7.0',
+            version: '0.7.2',
             hooked: true,
             mode: 'late-fallback',
             backgroundsLen: imagery.backgrounds.length,
@@ -378,7 +389,7 @@
 
     // ── Bootstrap ─────────────────────────────────────────────────────────────
 
-    window.__iDExtraBg = { version: '0.7.0', hooked: false, strategy: 'init' };
+    window.__iDExtraBg = { version: '0.7.2', hooked: false, strategy: 'init' };
 
     // The raw (unwrapped) iD namespace — used in places that need direct access
     // to iD internals without going through the Proxy (e.g. late path, reapply).
