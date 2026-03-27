@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         iD Editor: Multiple Custom Backgrounds
 // @namespace    https://github.com/endolith
-// @version      0.6.1
+// @version      0.7.0
 // @description  Adds multiple editable custom tile URL slots to the iD editor background list.
 // @homepageURL  https://github.com/openstreetmap/iD/issues/10055
 // @match        *://www.openstreetmap.org/id*
@@ -17,24 +17,27 @@
 //
 // TWO PATHS, both always attempted:
 //
-// Early (property interceptor):
-//   Use Object.defineProperty to intercept window.iD and window.iD.coreContext
-//   being assigned. iD bundles vary: some do window.iD = {coreContext,...} in
-//   one assignment; others do window.iD = {} early and add coreContext later.
-//   We handle both by watching the window.iD assignment AND the coreContext
-//   property on the iD object. The moment coreContext becomes a function, we
-//   wrap it before OSM can call it.
+// Early (Proxy interceptor):
+//   Intercepts the window.iD assignment and wraps the namespace object in a
+//   Proxy. The Proxy intercepts reads of iD.coreContext and returns our
+//   wrapped factory instead of the original.
 //
-//   NOTE: DOMContentLoaded capture was tried previously but proved unreliable
-//   for Violentmonkey iframe injection — the listener would never fire even
-//   when readyState was 'loading' at script start.
+//   WHY PROXY: iD exposes coreContext as a non-configurable getter property on
+//   the namespace object. Direct assignment (iDObj.coreContext = fn) silently
+//   fails. Object.defineProperty also fails (configurable: false). A Proxy
+//   intercepts property reads without touching the underlying descriptor.
+//
+//   When OSM calls iD.coreContext(), our factory runs first, wraps context.init,
+//   and returns the context. When init() fires we have the live context with a
+//   fully initialized background() system, allowing us to inject slots and fire
+//   background.baseLayerSource() to trigger a list re-render.
 //
 // Late (shared imagery fallback):
 //   Triggered ONLY after iD's background UI button appears (guaranteeing iD is
-//   fully initialized) AND the early path didn't hook. Calls a throwaway
-//   coreContext() to access the shared _imageryIndex singleton, splices extra
-//   entries into imagery.backgrounds, then toggles the background pane to
-//   force a re-render. injectSlotsIntoImagery() is idempotent.
+//   fully initialized) AND the early hook hasn't fired. Accesses the shared
+//   _imageryIndex singleton via a standalone rendererBackground instance,
+//   splices extra entries into imagery.backgrounds, then toggles the background
+//   pane to force a re-render. injectSlotsIntoImagery() is idempotent.
 // ─────────────────────────────────────────────────────────────────────────────
 
 (function () {
@@ -96,7 +99,8 @@
 
         for (let i = slots.length - 1; i >= 0; i--) {
             const slot   = slots[i];
-            const source = window.iD.rendererBackgroundSource({
+            // Use _iDRaw to bypass the Proxy and avoid recursion.
+            const source = _iDRaw.rendererBackgroundSource({
                 id:          `${ID_PREFIX}${i}`,
                 name:        slot.name || `Custom ${i + 1}`,
                 description: slot.template || 'No URL configured — click ⋯ to set',
@@ -114,7 +118,7 @@
         if (!btn) return false;
         const wasOpen = !!document.querySelector('.map-pane.background-pane.shown');
         btn.click();
-        setTimeout(() => { if (wasOpen) btn.click(); }, 100);
+        setTimeout(() => { if (wasOpen) btn.click(); }, 150);
         return true;
     }
 
@@ -136,59 +140,41 @@
 
     let _context = null;
 
-    function wrapCoreContext(iDObj) {
-        if (!iDObj || iDObj.__extraBgCoreContextWrapped) return;
-        const original = iDObj.coreContext;
-        if (typeof original !== 'function') return;
-        iDObj.__extraBgCoreContextWrapped = true;
-        dbg('coreContext wrapped');
-        iDObj.coreContext = function () {
-            const context = original.apply(this, arguments);
-            const originalInit = context.init;
-            context.init = function () {
-                const result = originalInit.apply(this, arguments);
-                _context = context;
-                context.ui()
-                    .ensureLoaded()
-                    .then(() => applySlots(context))
-                    .catch((err) =>
-                        console.error('[iD-extra-bg] applySlots failed', err)
-                    );
-                return result;
-            };
-            return context;
+    // Called by the Proxy when OSM reads iD.coreContext.
+    // Wraps context.init so we get the live context the moment it's initialized.
+    function wrappedCoreContext() {
+        const context = _origCC.apply(this, arguments);
+        const originalInit = context.init;
+        context.init = function () {
+            const result = originalInit.apply(this, arguments);
+            _context = context;
+            dbg('context.init hooked');
+            context.ui()
+                .ensureLoaded()
+                .then(() => applySlots(context))
+                .catch((err) =>
+                    console.error('[iD-extra-bg] applySlots failed', err)
+                );
+            return result;
         };
+        return context;
     }
 
-    // Full apply via real context (early path): reinit background + restart UI.
+    // Full apply via live context (early path): inject into shared imagery then
+    // fire baseLayerSource() to dispatch the background change event, which
+    // causes the background list UI to re-render from sources().
     async function applySlots(context) {
         dbg('applySlots start');
         const background = context.background();
         const imagery    = await background.ensureLoaded();
 
-        const activeOverlayIds = background.overlayLayerSources().map(sourceId);
-        background.overlayLayerSources().forEach(s => background.toggleOverlayLayer(s));
-
         injectSlotsIntoImagery(imagery);
 
-        await background.init();
-
-        const restorable = context.history().hasRestorableChanges();
-        dbg('hasRestorableChanges=', restorable);
-
-        if (!restorable) {
-            await new Promise(r => setTimeout(r, 0));
-            await context.ui().restart();
-            dbg('ui.restart() done');
-        }
-
-        activeOverlayIds.forEach(id => {
-            const src = background.findSource(id);
-            if (src) background.toggleOverlayLayer(src);
-        });
+        // Fire the change event so the background list re-renders.
+        background.baseLayerSource(background.baseLayerSource());
 
         window.__iDExtraBg = {
-            version: '0.6.1',
+            version: '0.7.0',
             hooked: true,
             mode: 'init-hook',
             backgroundsLen: imagery.backgrounds.length,
@@ -205,7 +191,7 @@
 
         // Wait for window.iD if not yet available.
         const start = Date.now();
-        while (!window.iD || typeof window.iD.coreContext !== 'function') {
+        while (!_iDRaw || typeof _iDRaw.coreContext !== 'function') {
             if (Date.now() - start > 20000) {
                 window.__iDExtraBg.error = 'window.iD.coreContext never became available';
                 console.error('[iD-extra-bg]', window.__iDExtraBg.error);
@@ -214,10 +200,13 @@
             await new Promise(r => setTimeout(r, 50));
         }
 
-        const imagery = await window.iD.coreContext().background().ensureLoaded();
+        // Use _iDRaw to create a standalone background instance — avoids calling
+        // wrappedCoreContext() which would produce an uninitialized context.
+        const bg      = _iDRaw.rendererBackground(_iDRaw.coreContext());
+        const imagery = await bg.ensureLoaded();
 
         if (imagery.backgrounds.some(b => sourceId(b).startsWith(ID_PREFIX))) {
-            dbg('slots already present in imagery (init-hook ran first)');
+            dbg('slots already present (init-hook ran first)');
             window.__iDExtraBg = Object.assign({}, window.__iDExtraBg, {
                 hooked: true, mode: 'already-injected',
             });
@@ -230,7 +219,7 @@
         injectSlotsIntoImagery(imagery);
 
         window.__iDExtraBg = {
-            version: '0.6.1',
+            version: '0.7.0',
             hooked: true,
             mode: 'late-fallback',
             backgroundsLen: imagery.backgrounds.length,
@@ -250,13 +239,14 @@
 
     // Re-apply after a URL is saved in the edit dialog.
     async function reapplyAfterSave() {
-        const imagery = await window.iD.coreContext().background().ensureLoaded();
+        const bg      = _iDRaw.rendererBackground(_iDRaw.coreContext());
+        const imagery = await bg.ensureLoaded();
         injectSlotsIntoImagery(imagery);
 
         if (_context) {
-            // Trigger the real background's change event so the list re-renders.
-            const bg = _context.background();
-            bg.baseLayerSource(bg.baseLayerSource());
+            // Trigger the live background's change event so the list re-renders.
+            const liveBg = _context.background();
+            liveBg.baseLayerSource(liveBg.baseLayerSource());
         } else {
             toggleBackgroundPaneRefresh();
             await new Promise(r => setTimeout(r, 200));
@@ -388,56 +378,59 @@
 
     // ── Bootstrap ─────────────────────────────────────────────────────────────
 
-    window.__iDExtraBg = { version: '0.6.1', hooked: false, strategy: 'init' };
+    window.__iDExtraBg = { version: '0.7.0', hooked: false, strategy: 'init' };
 
-    // Given an iD object, wrap coreContext immediately if present, or intercept
-    // the property so we catch it the instant it's added to the object.
-    function _setupCoreContextHook(iDObj) {
-        if (typeof iDObj.coreContext === 'function') {
-            wrapCoreContext(iDObj);
-            window.__iDExtraBg.strategy = 'coreContext-present';
-            return;
-        }
-        // coreContext not on the object yet — watch for it being assigned.
-        window.__iDExtraBg.strategy = 'watching-coreContext';
-        let _ccVal = iDObj.coreContext;
-        Object.defineProperty(iDObj, 'coreContext', {
-            configurable: true, enumerable: true,
-            get() { return _ccVal; },
-            set(fn) {
-                _ccVal = fn;
-                // Restore as a plain writable property so iD works normally.
-                try {
-                    Object.defineProperty(iDObj, 'coreContext', {
-                        configurable: true, enumerable: true, writable: true, value: fn,
-                    });
-                } catch (_) {}
-                if (typeof fn === 'function') {
-                    wrapCoreContext(iDObj);
-                    window.__iDExtraBg.strategy = 'coreContext-intercepted';
-                }
+    // The raw (unwrapped) iD namespace — used in places that need direct access
+    // to iD internals without going through the Proxy (e.g. late path, reapply).
+    let _iDRaw  = null;
+    // The original coreContext factory function, saved from the raw namespace.
+    let _origCC = null;
+
+    function _makeProxy(raw) {
+        _iDRaw  = raw;
+        _origCC = raw.coreContext;   // reads the non-configurable getter → the factory fn
+        return new Proxy(raw, {
+            get(target, prop) {
+                if (prop === 'coreContext') return wrappedCoreContext;
+                return target[prop];
+            },
+            set(target, prop, value) {
+                target[prop] = value;
+                return true;
             },
         });
     }
 
     if (window.iD) {
-        _setupCoreContextHook(window.iD);
+        // iD already set (unlikely at document-start, but handle it).
+        window.__iDExtraBg.strategy = 'iD-already-present';
+        dbg('window.iD already set at script start');
+        const proxy = _makeProxy(window.iD);
+        try {
+            Object.defineProperty(window, 'iD', {
+                configurable: true, enumerable: true, writable: true, value: proxy,
+            });
+        } catch (_) { window.iD = proxy; }
     } else {
-        // window.iD not set yet — intercept the assignment, then hook coreContext.
+        // Intercept the assignment of window.iD, then install the Proxy.
         window.__iDExtraBg.strategy = 'waiting-for-iD';
-        let _iDVal;
+        let _proxy = null;
         Object.defineProperty(window, 'iD', {
             configurable: true, enumerable: true,
-            get() { return _iDVal; },
+            get() { return _proxy; },
             set(val) {
-                _iDVal = val;
-                // Restore as a plain writable property so iD internals work normally.
+                _proxy = _makeProxy(val);
+                // Restore window.iD as a plain writable property (pointing to the
+                // Proxy) so iD's own internal accesses work without hitting our setter
+                // again.
                 try {
                     Object.defineProperty(window, 'iD', {
-                        configurable: true, enumerable: true, writable: true, value: val,
+                        configurable: true, enumerable: true, writable: true,
+                        value: _proxy,
                     });
                 } catch (_) {}
-                if (val) _setupCoreContextHook(val);
+                window.__iDExtraBg.strategy = 'proxy-installed';
+                dbg('window.iD intercepted, Proxy installed');
             },
         });
     }
