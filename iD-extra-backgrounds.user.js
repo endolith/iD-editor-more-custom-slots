@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         iD Editor: Multiple Custom Backgrounds
 // @namespace    https://github.com/endolith
-// @version      0.7.3
+// @version      0.7.4
 // @description  Adds multiple editable custom tile URL slots to the iD editor background list.
 // @homepageURL  https://github.com/openstreetmap/iD/issues/10055
 // @match        *://www.openstreetmap.org/id*
@@ -53,7 +53,7 @@
     'use strict';
 
     /** Bumped together with `// @version` in the userscript header above. */
-    const SCRIPT_VERSION = '0.7.3';
+    const SCRIPT_VERSION = '0.7.4';
 
     // ── User-configurable ─────────────────────────────────────────────────────
     const NUM_SLOTS = 3;   // how many extra Custom slots to add
@@ -61,6 +61,30 @@
 
     const STORAGE_KEY = 'iD-extra-bg-slots';
     const ID_PREFIX   = 'custom-extra-';
+
+    // HTML equivalent of what iD produces by passing its core.yaml locale strings through marked().
+    // iD source: modules/ui/settings/custom_background.js builds markdown (#### headings, * bullets,
+    // `backtick` code spans) from data/core.yaml settings.custom_background.instructions, then calls
+    // marked(). This is the verbatim HTML that results — do not summarize or elide.
+    const ID_CUSTOM_BG_INSTRUCTIONS_HTML = `\
+<p>Enter a tile URL template below.</p>
+<h4>Supported WMS tokens:</h4>
+<ul>
+<li><code>{proj}</code>: requested projection (<code>EPSG:3857</code> only)</li>
+<li><code>{wkid}</code>: same as proj, but without the EPSG (<code>3857</code> only)</li>
+<li><code>{width}</code>, <code>{height}</code>: requested image dimensions (<code>256</code> only)</li>
+<li><code>{bbox}</code>: requested bounding box (e.g. <code>minX,minY,maxX,maxY</code>)</li>
+</ul>
+<h4>Supported TMS tokens:</h4>
+<ul>
+<li><code>{zoom}</code> or <code>{z}</code>, <code>{x}</code>, <code>{y}</code>: Z/X/Y tile coordinates</li>
+<li><code>{-y}</code> or <code>{ty}</code>: flipped TMS-style Y coordinates</li>
+<li><code>{switch:a,b,c}</code>: DNS server multiplexing</li>
+<li><code>{u}</code>: quadtile (Bing) scheme</li>
+<li><code>{@2x}</code> or <code>{r}</code>: resolution scale factor</li>
+</ul>
+<h4>Example:</h4>
+<p><code>https://tile.openstreetmap.org/{zoom}/{x}/{y}.png</code></p>`;
 
     const DEBUG = () => localStorage.getItem('iD-extra-bg-debug') === '1';
     function dbg(...args) {
@@ -322,27 +346,7 @@
         const slots = loadSlots();
         const slot  = slots[slotIndex];
 
-        const example = 'https://tile.openstreetmap.org/{zoom}/{x}/{y}.png';
-        const instructionsHtml = `
-<p>Enter a tile URL template below.</p>
-<h4>Supported WMS tokens</h4>
-<ul>
-<li><code>{proj}</code></li>
-<li><code>{wkid}</code></li>
-<li><code>{width}</code> and <code>{height}</code></li>
-<li><code>{bbox}</code></li>
-</ul>
-<h4>Supported TMS tokens</h4>
-<ul>
-<li><code>{zoom}</code> or <code>{z}</code>, <code>{x}</code>, <code>{y}</code></li>
-<li><code>{-y}</code> or <code>{ty}</code> (flipped Y)</li>
-<li><code>{switch:a,b,c}</code></li>
-<li><code>{u}</code> (quadtile)</li>
-<li><code>{@2x}</code> or <code>{r}</code> (scale factor)</li>
-</ul>
-<h4>Example</h4>
-<p><code>${example}</code></p>
-`;
+        const instructionsHtml = ID_CUSTOM_BG_INSTRUCTIONS_HTML;
 
         const shaded = document.createElement('div');
         shaded.id = 'extra-bg-edit-modal';
