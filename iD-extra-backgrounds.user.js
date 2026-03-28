@@ -324,10 +324,14 @@
 
             // iD's drawListItems sets the label <span> only on D3 *enter*, never on
             // update (it uses id+'---'+i as the key so existing rows are never re-entered
-            // even when the pane is closed/reopened). Update the text directly every time
-            // so a rename takes effect immediately without a page reload.
+            // even when the pane is closed/reopened). Update the text directly so a rename
+            // takes effect immediately without a page reload.
+            // IMPORTANT: guard with a value check before writing — this function is called
+            // from a MutationObserver (childList+subtree), and setting textContent replaces
+            // the child text node, which would re-fire the observer and cause an infinite loop.
             const span = li.querySelector('label > span');
-            if (span) span.textContent = slot.name || `Custom ${i + 1}`;
+            const wantedName = slot.name || `Custom ${i + 1}`;
+            if (span && span.textContent !== wantedName) span.textContent = wantedName;
 
             if (li.dataset.extraBgPatched) return;
             li.dataset.extraBgPatched = 'true';
