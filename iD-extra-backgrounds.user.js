@@ -1,13 +1,16 @@
 // ==UserScript==
 // @name         iD Editor: Multiple Custom Backgrounds
 // @namespace    https://github.com/endolith
-// @version      0.7.2
+// @version      0.7.3
 // @description  Adds multiple editable custom tile URL slots to the iD editor background list.
 // @homepageURL  https://github.com/openstreetmap/iD/issues/10055
 // @match        *://www.openstreetmap.org/id*
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
+
+// Bump releases: set `// @version` above and SCRIPT_VERSION in the IIFE to the same value
+// (Violentmonkey / Greasy Fork only read the header; runtime code uses SCRIPT_VERSION).
 
 // HOW IT WORKS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -48,6 +51,9 @@
 
 (function () {
     'use strict';
+
+    /** Bumped together with `// @version` in the userscript header above. */
+    const SCRIPT_VERSION = '0.7.3';
 
     // ── User-configurable ─────────────────────────────────────────────────────
     const NUM_SLOTS = 3;   // how many extra Custom slots to add
@@ -172,8 +178,9 @@
     }
 
     // Full apply via live context (early path): inject into shared imagery then
-    // fire baseLayerSource() to dispatch the background change event, which
-    // causes the background list UI to re-render from sources().
+    // ping baseLayerSource so iD's background_list change listener runs
+    // (updateLayerSelections: checked state, tooltips). New rows may still need
+    // a pane refresh or map-driven reRender; late path uses toggleBackgroundPaneRefresh.
     async function applySlots(context) {
         dbg('applySlots start');
         const background = context.background();
@@ -181,11 +188,10 @@
 
         injectSlotsIntoImagery(imagery);
 
-        // Fire the change event so the background list re-renders.
         background.baseLayerSource(background.baseLayerSource());
 
         window.__iDExtraBg = {
-            version: '0.7.2',
+            version: SCRIPT_VERSION,
             hooked: true,
             mode: 'init-hook',
             backgroundsLen: imagery.backgrounds.length,
@@ -230,7 +236,7 @@
         injectSlotsIntoImagery(imagery);
 
         window.__iDExtraBg = {
-            version: '0.7.2',
+            version: SCRIPT_VERSION,
             hooked: true,
             mode: 'late-fallback',
             backgroundsLen: imagery.backgrounds.length,
@@ -249,19 +255,24 @@
     }
 
     // Re-apply after a URL is saved in the edit dialog.
+    // iD's background list only sets label text on D3 enter, not on change — so after
+    // renaming a slot we must refresh the pane (or reload) for the radio label to update.
     async function reapplyAfterSave() {
         const bg      = _iDRaw.rendererBackground(_iDRaw.coreContext());
         const imagery = await bg.ensureLoaded();
         injectSlotsIntoImagery(imagery);
 
         if (_context) {
-            // Trigger the live background's change event so the list re-renders.
             const liveBg = _context.background();
+            // Fire the live background's change event (same id) so iD syncs radio
+            // checked state and tooltips to the updated source objects — see
+            // background_list.js updateLayerSelections. This does not redraw labels;
+            // toggleBackgroundPaneRefresh below rebuilds the list for new names.
             liveBg.baseLayerSource(liveBg.baseLayerSource());
-        } else {
-            toggleBackgroundPaneRefresh();
-            await new Promise(r => setTimeout(r, 200));
         }
+
+        toggleBackgroundPaneRefresh();
+        await new Promise(r => setTimeout(r, 250));
 
         patchBackgroundListDOM(_context);
     }
@@ -301,6 +312,9 @@
     }
 
     // ── Edit dialog ───────────────────────────────────────────────────────────
+    // Match iD's uiModal + uiConfirm + uiSettingsCustomBackground structure so
+    // bundled CSS (.shaded, .modal.fillL, .content, .settings-custom-background,
+    // .instructions-template, .field-template) applies. Host under .ideditor like iD does.
 
     function openEditDialog(slotIndex) {
         document.getElementById('extra-bg-edit-modal')?.remove();
@@ -308,75 +322,93 @@
         const slots = loadSlots();
         const slot  = slots[slotIndex];
 
-        const backdrop = document.createElement('div');
-        backdrop.id        = 'extra-bg-edit-modal';
-        backdrop.className = 'modal-wrap';
-        Object.assign(backdrop.style, {
-            position: 'fixed', inset: '0', zIndex: '10000',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            background: 'rgba(0,0,0,0.5)',
+        const example = 'https://tile.openstreetmap.org/{zoom}/{x}/{y}.png';
+        const instructionsHtml = `
+<p>Enter a tile URL template below.</p>
+<h4>Supported WMS tokens</h4>
+<ul>
+<li><code>{proj}</code></li>
+<li><code>{wkid}</code></li>
+<li><code>{width}</code> and <code>{height}</code></li>
+<li><code>{bbox}</code></li>
+</ul>
+<h4>Supported TMS tokens</h4>
+<ul>
+<li><code>{zoom}</code> or <code>{z}</code>, <code>{x}</code>, <code>{y}</code></li>
+<li><code>{-y}</code> or <code>{ty}</code> (flipped Y)</li>
+<li><code>{switch:a,b,c}</code></li>
+<li><code>{u}</code> (quadtile)</li>
+<li><code>{@2x}</code> or <code>{r}</code> (scale factor)</li>
+</ul>
+<h4>Example</h4>
+<p><code>${example}</code></p>
+`;
+
+        const shaded = document.createElement('div');
+        shaded.id = 'extra-bg-edit-modal';
+        shaded.className = 'shaded';
+        shaded.addEventListener('click', (e) => {
+            if (e.target === shaded) shaded.remove();
         });
 
         const modal = document.createElement('div');
-        modal.className = 'modal fillL';
-        Object.assign(modal.style, { maxWidth: '560px', width: '90vw' });
+        modal.className = 'modal fillL settings-modal settings-custom-background';
 
-        const example = 'https://tile.openstreetmap.org/{zoom}/{x}/{y}.png';
-        modal.innerHTML = `
-            <div class="modal-section header">
-                <h3>Custom Background Settings</h3>
-            </div>
-            <div class="modal-section message-text">
-                <div style="margin-bottom:10px;">
-                    <label style="display:block;font-weight:bold;margin-bottom:4px;">Name</label>
-                    <input id="ebg-name" type="text" value="${esc(slot.name)}"
-                        autocomplete="off" spellcheck="false"
-                        style="width:100%;padding:6px 8px;box-sizing:border-box;
-                               border:1px solid #ccc;border-radius:3px;">
-                </div>
-                <div>
-                    <label style="display:block;font-weight:bold;margin-bottom:4px;">Tile URL Template</label>
-                    <textarea id="ebg-template" rows="3"
-                        placeholder="${esc(example)}"
-                        autocomplete="off" spellcheck="false"
-                        style="width:100%;padding:6px 8px;box-sizing:border-box;
-                               border:1px solid #ccc;border-radius:3px;
-                               font-family:monospace;resize:vertical;"
-                    >${esc(slot.template)}</textarea>
-                </div>
-                <p style="font-size:12px;color:#888;margin:6px 0 0;">
-                    TMS: <code>{x}</code> <code>{y}</code> <code>{z}</code> or <code>{zoom}</code> &nbsp;·&nbsp;
-                    WMS: <code>{proj}</code> <code>{bbox}</code> <code>{width}</code> <code>{height}</code>
-                </p>
-            </div>
-            <div class="modal-section buttons">
-                <button id="ebg-cancel" class="button cancel-button secondary-action">Cancel</button>
-                <button id="ebg-save" class="button ok-button action">OK</button>
-            </div>
-        `;
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'close';
+        closeBtn.setAttribute('title', 'Close');
+        closeBtn.setAttribute('aria-label', 'Close');
+        closeBtn.innerHTML = '<svg class="icon"><use xlink:href="#iD-icon-close"></use></svg>';
+        closeBtn.addEventListener('click', () => shaded.remove());
 
-        backdrop.appendChild(modal);
-        document.body.appendChild(backdrop);
+        const content = document.createElement('div');
+        content.className = 'content';
+        content.innerHTML = `
+<div class="modal-section header">
+  <h3>Custom Background Settings</h3>
+</div>
+<div class="modal-section message-text">
+  <p class="extra-bg-slot-intro">
+    <strong>Display name</strong> (shown in the background list next to the radio button).
+    After you click OK, the list refreshes once so the new name appears.
+  </p>
+  <input id="ebg-name" type="text" class="field" value="${esc(slot.name)}"
+    autocomplete="off" spellcheck="false">
+  <div class="instructions-template">${instructionsHtml}</div>
+  <textarea id="ebg-template" class="field-template" rows="6"
+    placeholder="Enter a url template."
+    autocomplete="off" spellcheck="false">${esc(slot.template)}</textarea>
+</div>
+<div class="modal-section buttons cf">
+  <button type="button" id="ebg-cancel" class="button cancel-button secondary-action">Cancel</button>
+  <button type="button" id="ebg-save" class="button ok-button action">OK</button>
+</div>
+`;
 
-        const nameEl     = modal.querySelector('#ebg-name');
-        const templateEl = modal.querySelector('#ebg-template');
+        modal.appendChild(closeBtn);
+        modal.appendChild(content);
+        shaded.appendChild(modal);
 
-        modal.querySelector('#ebg-cancel').addEventListener('click', () => backdrop.remove());
-        backdrop.addEventListener('click', e => { if (e.target === backdrop) backdrop.remove(); });
-        modal.querySelector('#ebg-save').addEventListener('click', () => {
+        const host = document.querySelector('.ideditor') || document.querySelector('#id-container') || document.body;
+        host.appendChild(shaded);
+
+        const nameEl     = content.querySelector('#ebg-name');
+        const templateEl = content.querySelector('#ebg-template');
+
+        content.querySelector('#ebg-cancel').addEventListener('click', () => shaded.remove());
+        content.querySelector('#ebg-save').addEventListener('click', () => {
             slots[slotIndex] = {
                 name:     nameEl.value.trim() || `Custom ${slotIndex + 1}`,
                 template: templateEl.value.trim(),
             };
             saveSlots(slots);
-            backdrop.remove();
+            shaded.remove();
             reapplyAfterSave().catch((err) =>
                 console.error('[iD-extra-bg] reapplyAfterSave failed', err)
             );
         });
 
-        nameEl.select();
-        nameEl.focus();
+        templateEl.focus();
     }
 
     function esc(str) {
@@ -389,7 +421,7 @@
 
     // ── Bootstrap ─────────────────────────────────────────────────────────────
 
-    window.__iDExtraBg = { version: '0.7.2', hooked: false, strategy: 'init' };
+    window.__iDExtraBg = { version: SCRIPT_VERSION, hooked: false, strategy: 'init' };
 
     // The raw (unwrapped) iD namespace — used in places that need direct access
     // to iD internals without going through the Proxy (e.g. late path, reapply).
