@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         iD Editor: Multiple Custom Backgrounds
 // @namespace    https://github.com/endolith
-// @version      0.7.4
+// @version      0.7.5
 // @description  Adds multiple editable custom tile URL slots to the iD editor background list.
 // @homepageURL  https://github.com/openstreetmap/iD/issues/10055
 // @match        *://www.openstreetmap.org/id*
@@ -53,7 +53,7 @@
     'use strict';
 
     /** Bumped together with `// @version` in the userscript header above. */
-    const SCRIPT_VERSION = '0.7.4';
+    const SCRIPT_VERSION = '0.7.5';
 
     // ── User-configurable ─────────────────────────────────────────────────────
     const NUM_SLOTS = 3;   // how many extra Custom slots to add
@@ -290,14 +290,15 @@
             const liveBg = _context.background();
             // Fire the live background's change event (same id) so iD syncs radio
             // checked state and tooltips to the updated source objects — see
-            // background_list.js updateLayerSelections. This does not redraw labels;
-            // toggleBackgroundPaneRefresh below rebuilds the list for new names.
+            // background_list.js updateLayerSelections.
             liveBg.baseLayerSource(liveBg.baseLayerSource());
         }
 
-        toggleBackgroundPaneRefresh();
-        await new Promise(r => setTimeout(r, 250));
-
+        // patchBackgroundListDOM updates the label <span> text directly, which is
+        // necessary because iD's drawListItems only sets the span on D3 enter (the
+        // key is id+'---'+i, so existing rows are never re-entered). The old
+        // toggleBackgroundPaneRefresh approach closed/reopened the pane but that only
+        // hides/shows a CSS class — it does not destroy and recreate the list DOM.
         patchBackgroundListDOM(_context);
     }
 
@@ -313,13 +314,22 @@
 
     function patchBackgroundListDOM(context) {
         const slots = loadSlots();
-        slots.forEach((_, i) => {
+        slots.forEach((slot, i) => {
             const radio = document.querySelector(
                 `input[name="background-layer"][value="${ID_PREFIX}${i}"]`
             );
             if (!radio) return;
             const li = radio.closest('li');
-            if (!li || li.dataset.extraBgPatched) return;
+            if (!li) return;
+
+            // iD's drawListItems sets the label <span> only on D3 *enter*, never on
+            // update (it uses id+'---'+i as the key so existing rows are never re-entered
+            // even when the pane is closed/reopened). Update the text directly every time
+            // so a rename takes effect immediately without a page reload.
+            const span = li.querySelector('label > span');
+            if (span) span.textContent = slot.name || `Custom ${i + 1}`;
+
+            if (li.dataset.extraBgPatched) return;
             li.dataset.extraBgPatched = 'true';
 
             const btn = document.createElement('button');
