@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         iD editor: more custom background slots
 // @namespace    https://github.com/endolith/iD-editor-more-custom-slots
-// @version      0.7.7
+// @version      0.7.8
 // @description  Extra custom background tile URL slots for www.openstreetmap.org iD.
 // @author       endolith
 // @license      CC0-1.0
@@ -11,57 +11,34 @@
 // @updateURL    https://raw.githubusercontent.com/endolith/iD-editor-more-custom-slots/main/iD-editor-more-custom-slots.user.js
 // @match        https://www.openstreetmap.org/id*
 // @run-at       document-start
-// @grant        GM_addElement
+// @grant        none
 // ==/UserScript==
 
-// Bump releases: set `// @version` above and SCRIPT_VERSION in the IIFE to the same value
-// (Violentmonkey / Greasy Fork only read the header; runtime code uses SCRIPT_VERSION).
+// Bump releases: keep `// @version` (header) and `SCRIPT_VERSION` (below) identical.
+// Managers read the header; __iDExtraBg.version uses SCRIPT_VERSION at runtime.
 
 // HOW IT WORKS
 // ─────────────────────────────────────────────────────────────────────────────
-// iD runs in an iframe at /id (not /edit). Read debug state from the parent:
-//   document.getElementById('id-embed').contentWindow.__iDExtraBg
+// Debug from parent when iD is in an iframe: document.getElementById('id-embed').contentWindow
 //
-// TWO PATHS, both always attempted:
+// One plain IIFE, @grant none (same idea as git history before GM_addElement). No GM_addElement.
+// The userscript must run in the page JS world: Chrome + Tampermonkey needs Developer mode +
+// “Allow user scripts”; otherwise TM stays isolated and hooked stays false.
 //
-// Tampermonkey + Chrome: OSM's CSP is script-src 'self' + nonce only (no unsafe-inline,
-// no blob:). TM's @sandbox default is "raw" (MAIN_WORLD), but when MAIN injection is not
-// allowed the script falls back to ISOLATED_WORLD — window.iD is never the real page object,
-// so hooked stays false. @grant GM_addElement + injecting the payload via GM_addElement
-// (TM docs: for pages that limit script tags with CSP) runs the hook in the real page JS
-// world. Do not use a plain DOM <script> from the userscript without GM_addElement; that
-// stays on the wrong world or hits CSP. Firefox/Violentmonkey often inject page context
-// already; GM_addElement still works and only runs the inner IIFE once in the page.
+// Hook (not optional): iD exposes coreContext as a non-configurable getter on the object
+// assigned to window.iD. You cannot replace it with assignment or defineProperty. We wrap
+// window.iD in a Proxy and intercept reads of coreContext — that is the minimal way to
+// wrap the factory. When iD calls coreContext(), we wrap context.init and inject slots.
 //
-// Early (Proxy interceptor):
-//   Intercepts the window.iD assignment and wraps the namespace object in a
-//   Proxy. The Proxy intercepts reads of iD.coreContext and returns our
-//   wrapped factory instead of the original.
-//
-//   WHY PROXY: iD exposes coreContext as a non-configurable getter property on
-//   the namespace object. Direct assignment (iDObj.coreContext = fn) silently
-//   fails. Object.defineProperty also fails (configurable: false). A Proxy
-//   intercepts property reads without touching the underlying descriptor.
-//
-//   When OSM calls iD.coreContext(), our factory runs first, wraps context.init,
-//   and returns the context. When init() fires we have the live context with a
-//   fully initialized background() system, allowing us to inject slots and fire
-//   background.baseLayerSource() to trigger a list re-render.
-//
-// Late (shared imagery fallback):
-//   Triggered ONLY after iD's background UI button appears (guaranteeing iD is
-//   fully initialized) AND the early hook hasn't fired. Accesses the shared
-//   _imageryIndex singleton via a standalone rendererBackground instance,
-//   splices extra entries into imagery.backgrounds, then toggles the background
-//   pane to force a re-render. injectSlotsIntoImagery() is idempotent.
+// Late fallback: if the early hook never runs, a timer waits for the background UI, then
+// mutates the shared imagery list and patches the DOM. injectSlotsIntoImagery is idempotent.
 // ─────────────────────────────────────────────────────────────────────────────
 
 (function () {
-    function runInPage() {
-        'use strict';
+    'use strict';
 
-    /** Bumped together with `// @version` in the userscript header above. */
-    const SCRIPT_VERSION = '0.7.7';
+    /** Same string as `// @version` in the userscript header above. */
+    const SCRIPT_VERSION = '0.7.8';
 
     // ── User-configurable ─────────────────────────────────────────────────────
     const NUM_SLOTS = 3;   // how many extra Custom slots to add
@@ -116,7 +93,7 @@
                 }
                 return parsed.slice(0, NUM_SLOTS);
             }
-        } catch (_) {}
+        } catch (_) { }
         return Array.from({ length: NUM_SLOTS }, (_, i) => ({
             name: `Custom ${i + 1}`,
             template: '',
@@ -141,10 +118,10 @@
         const customIdx = imagery.backgrounds.findIndex(b => sourceId(b) === 'custom');
         // Insert AFTER the built-in 'custom' entry so our slots appear next to it.
         // If 'custom' isn't found, append to the end.
-        const insertAt  = customIdx >= 0 ? customIdx + 1 : imagery.backgrounds.length;
+        const insertAt = customIdx >= 0 ? customIdx + 1 : imagery.backgrounds.length;
 
         for (let i = slots.length - 1; i >= 0; i--) {
-            const slot   = slots[i];
+            const slot = slots[i];
             // Use _iDRaw to bypass the Proxy and avoid recursion.
             const source = _iDRaw.rendererBackgroundSource({
                 id:          `${ID_PREFIX}${i}`,
@@ -497,7 +474,7 @@
                         configurable: true, enumerable: true, writable: true,
                         value: _proxy,
                     });
-                } catch (_) {}
+                } catch (_) { }
                 window.__iDExtraBg.strategy = 'proxy-installed';
                 dbg('window.iD intercepted, Proxy installed');
             },
@@ -520,33 +497,4 @@
     dbg('bootstrap done, strategy=', window.__iDExtraBg.strategy,
         'readyState=', document.readyState);
 
-    }
-
-    function injectIntoPage() {
-        const payload = '(' + runInPage.toString() + ')();';
-        if (typeof GM_addElement === 'function') {
-            try {
-                GM_addElement('script', { textContent: payload });
-                return;
-            } catch (err) {
-                console.error('[iD-extra-bg] GM_addElement failed', err);
-            }
-        }
-        runInPage();
-    }
-
-    if (document.documentElement) {
-        injectIntoPage();
-    } else {
-        const deadline = Date.now() + 30000;
-        const tick = setInterval(() => {
-            if (document.documentElement) {
-                clearInterval(tick);
-                injectIntoPage();
-            } else if (Date.now() > deadline) {
-                clearInterval(tick);
-                injectIntoPage();
-            }
-        }, 10);
-    }
 })();
