@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         iD Editor: Multiple Custom Backgrounds
 // @namespace    https://github.com/endolith
-// @version      0.7.5
+// @version      0.7.6
 // @description  Adds multiple editable custom tile URL slots to the iD editor background list.
 // @homepageURL  https://github.com/openstreetmap/iD/issues/10055
 // @match        *://www.openstreetmap.org/id*
 // @run-at       document-start
-// @grant        none
+// @grant        GM_addElement
 // ==/UserScript==
 
 // Bump releases: set `// @version` above and SCRIPT_VERSION in the IIFE to the same value
@@ -19,12 +19,14 @@
 //
 // TWO PATHS, both always attempted:
 //
-// NOTE: @inject-into page is intentionally absent. With that directive,
-//   Tampermonkey injects via a <script> element which OSM's CSP blocks
-//   (no unsafe-inline). Without it, Tampermonkey uses chrome.scripting
-//   .executeScript({ world:"MAIN" }) which bypasses CSP and still runs in
-//   the page context. Violentmonkey users: use @inject-into page if your
-//   version handles CSP, otherwise use @inject-into content with unsafeWindow.
+// Tampermonkey + Chrome: OSM's CSP is script-src 'self' + nonce only (no unsafe-inline,
+// no blob:). TM's @sandbox default is "raw" (MAIN_WORLD), but when MAIN injection is not
+// allowed the script falls back to ISOLATED_WORLD — window.iD is never the real page object,
+// so hooked stays false. @grant GM_addElement + injecting the payload via GM_addElement
+// (TM docs: for pages that limit script tags with CSP) runs the hook in the real page JS
+// world. Do not use a plain DOM <script> from the userscript without GM_addElement; that
+// stays on the wrong world or hits CSP. Firefox/Violentmonkey often inject page context
+// already; GM_addElement still works and only runs the inner IIFE once in the page.
 //
 // Early (Proxy interceptor):
 //   Intercepts the window.iD assignment and wraps the namespace object in a
@@ -50,10 +52,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 (function () {
-    'use strict';
+    function runInPage() {
+        'use strict';
 
     /** Bumped together with `// @version` in the userscript header above. */
-    const SCRIPT_VERSION = '0.7.5';
+    const SCRIPT_VERSION = '0.7.6';
 
     // ── User-configurable ─────────────────────────────────────────────────────
     const NUM_SLOTS = 3;   // how many extra Custom slots to add
@@ -512,4 +515,33 @@
     dbg('bootstrap done, strategy=', window.__iDExtraBg.strategy,
         'readyState=', document.readyState);
 
+    }
+
+    function injectIntoPage() {
+        const payload = '(' + runInPage.toString() + ')();';
+        if (typeof GM_addElement === 'function') {
+            try {
+                GM_addElement('script', { textContent: payload });
+                return;
+            } catch (err) {
+                console.error('[iD-extra-bg] GM_addElement failed', err);
+            }
+        }
+        runInPage();
+    }
+
+    if (document.documentElement) {
+        injectIntoPage();
+    } else {
+        const deadline = Date.now() + 30000;
+        const tick = setInterval(() => {
+            if (document.documentElement) {
+                clearInterval(tick);
+                injectIntoPage();
+            } else if (Date.now() > deadline) {
+                clearInterval(tick);
+                injectIntoPage();
+            }
+        }, 10);
+    }
 })();
