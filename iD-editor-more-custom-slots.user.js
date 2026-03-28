@@ -1,10 +1,15 @@
 // ==UserScript==
-// @name         iD Editor: Multiple Custom Backgrounds
-// @namespace    https://github.com/endolith
-// @version      0.7.6
-// @description  Adds multiple editable custom tile URL slots to the iD editor background list.
-// @homepageURL  https://github.com/openstreetmap/iD/issues/10055
-// @match        *://www.openstreetmap.org/id*
+// @name         iD editor: more custom background slots
+// @namespace    https://github.com/endolith/iD-editor-more-custom-slots
+// @version      0.7.7
+// @description  Extra custom background tile URL slots for www.openstreetmap.org iD.
+// @author       endolith
+// @license      CC0-1.0
+// @homepageURL  https://github.com/endolith/iD-editor-more-custom-slots
+// @supportURL   https://github.com/endolith/iD-editor-more-custom-slots/issues
+// @downloadURL  https://raw.githubusercontent.com/endolith/iD-editor-more-custom-slots/main/iD-editor-more-custom-slots.user.js
+// @updateURL    https://raw.githubusercontent.com/endolith/iD-editor-more-custom-slots/main/iD-editor-more-custom-slots.user.js
+// @match        https://www.openstreetmap.org/id*
 // @run-at       document-start
 // @grant        GM_addElement
 // ==/UserScript==
@@ -56,7 +61,7 @@
         'use strict';
 
     /** Bumped together with `// @version` in the userscript header above. */
-    const SCRIPT_VERSION = '0.7.6';
+    const SCRIPT_VERSION = '0.7.7';
 
     // ── User-configurable ─────────────────────────────────────────────────────
     const NUM_SLOTS = 3;   // how many extra Custom slots to add
