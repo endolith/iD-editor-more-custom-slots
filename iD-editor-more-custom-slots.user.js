@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         iD editor: more custom background slots
 // @namespace    https://github.com/endolith/iD-editor-more-custom-slots
-// @version      0.7.8
+// @version      0.7.9
 // @description  Extra custom background tile URL slots for www.openstreetmap.org iD.
 // @author       endolith
 // @license      CC0-1.0
@@ -38,7 +38,7 @@
     'use strict';
 
     /** Same string as `// @version` in the userscript header above. */
-    const SCRIPT_VERSION = '0.7.8';
+    const SCRIPT_VERSION = '0.7.9';
 
     // ── User-configurable ─────────────────────────────────────────────────────
     const NUM_SLOTS = 3;   // how many extra Custom slots to add
@@ -79,6 +79,46 @@
     function sourceId(b) {
         if (!b) return '';
         return typeof b.id === 'function' ? b.id() : (b.id || '');
+    }
+
+    // Extra slots are built with rendererBackgroundSource(), whose default
+    // imageryUsed() is only the display name. The built-in Custom layer instead
+    // overrides imageryUsed() to append the sanitized template (see iD
+    // rendererBackgroundSource.Custom in background_source.js, OSM #6801). OSM
+    // changeset imagery_used must list the tile URL for accountability; without
+    // this override, extra slots contributed only the user-chosen label.
+    function stringQsLikeId(str) {
+        str = String(str).replace(/^[#?]{0,2}/, '');
+        return Object.fromEntries(new URLSearchParams(str));
+    }
+    function qsStringLikeId(obj, softEncode) {
+        var s = new URLSearchParams(obj).toString();
+        if (softEncode) {
+            s = s.replace(/(%2F|%3A|%2C|%7B|%7D)/g, decodeURIComponent);
+        }
+        return s;
+    }
+    function sanitizeImageryUsedTemplate(template) {
+        var cleaned = String(template || '');
+        if (cleaned.indexOf('?') !== -1) {
+            var parts = cleaned.split('?', 2);
+            var qs = stringQsLikeId(parts[1]);
+            ['access_token', 'connectId', 'token', 'Signature'].forEach(function (param) {
+                if (qs[param]) qs[param] = '{apikey}';
+            });
+            cleaned = parts[0] + '?' + qsStringLikeId(qs, true);
+        }
+        return cleaned
+            .replace(/token\/(\w+)/, 'token/{apikey}')
+            .replace(/key=(\w+)/, 'key={apikey}');
+    }
+    function installExtraSlotImageryUsed(source, displayName) {
+        source.imageryUsed = function () {
+            var tmpl = source.template();
+            if (!tmpl) return displayName;
+            var cleaned = sanitizeImageryUsedTemplate(tmpl);
+            return displayName + ' (' + cleaned + ' )';
+        };
     }
 
     // ── Slot persistence ──────────────────────────────────────────────────────
@@ -123,9 +163,10 @@
         for (let i = slots.length - 1; i >= 0; i--) {
             const slot = slots[i];
             // Use _iDRaw to bypass the Proxy and avoid recursion.
+            const displayName = slot.name || `Custom ${i + 1}`;
             const source = _iDRaw.rendererBackgroundSource({
                 id:          `${ID_PREFIX}${i}`,
-                name:        slot.name || `Custom ${i + 1}`,
+                name:        displayName,
                 description: slot.template || 'No URL configured — click ⋯ to set',
                 template:    slot.template || '',
                 overlay:     false,
@@ -133,6 +174,7 @@
             // Override area so iD's background list sorts these to the bottom,
             // grouped with the built-in 'Custom' entry (which has area = -2).
             source.area = function () { return -2; };
+            installExtraSlotImageryUsed(source, displayName);
             imagery.backgrounds.splice(insertAt, 0, source);
         }
         return slots;
